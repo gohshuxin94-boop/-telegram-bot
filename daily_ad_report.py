@@ -1,11 +1,16 @@
 import asyncio
+import logging
 import os
 import re
 import sys
 import requests
+import pytz
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Bot
+
+log = logging.getLogger(__name__)
+KL = pytz.timezone("Asia/Kuala_Lumpur")
 
 load_dotenv()
 
@@ -39,7 +44,12 @@ def fetch_account_insights(account_id: str, date_preset: str) -> dict:
     }
     try:
         resp = requests.get(url, params=params, timeout=10)
-        data = resp.json().get("data", [])
+        raw = resp.json()
+        if "error" in raw:
+            log.error(f"Meta API error ({account_id}): {raw['error']}")
+            return {"spend": 0, "impressions": 0, "clicks": 0, "conversations": 0, "cpmc": 0}
+        data = raw.get("data", [])
+        log.info(f"fetch_account_insights ({account_id}, {date_preset}): {len(data)} record(s)")
         if data:
             d = data[0]
             spend = float(d.get("spend", 0) or 0)
@@ -52,8 +62,8 @@ def fetch_account_insights(account_id: str, date_preset: str) -> dict:
                 "conversations": int(conversations),
                 "cpmc": cpmc,  # cost per messaging conversation
             }
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f"fetch_account_insights error ({account_id}): {e}")
     return {"spend": 0, "impressions": 0, "clicks": 0, "conversations": 0, "cpmc": 0}
 
 
@@ -154,7 +164,8 @@ async def fetch_account_data_async(account: dict, date_preset: str) -> tuple:
 
 
 async def send_morning_report():
-    report_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    now_kl = datetime.now(KL)
+    report_date = (now_kl - timedelta(days=1)).strftime("%Y-%m-%d")
     date_preset = "yesterday"
     print(f"拉取 {report_date} 的广告数据（并行）...")
 
@@ -169,13 +180,14 @@ async def send_morning_report():
     report = build_morning_report(accounts_data, top5, report_date)
     bot = Bot(token=BOT_TOKEN)
     await bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
-    print(f"[{datetime.now().strftime('%H:%M')}] 早间报告已发送")
+    print(f"[{datetime.now(KL).strftime('%H:%M')}] 早间报告已发送")
 
 
 async def send_progress_report():
     date_preset = "today"
-    report_date = datetime.now().strftime("%Y-%m-%d")
-    time_str = datetime.now().strftime("%H:%M")
+    now_kl = datetime.now(KL)
+    report_date = now_kl.strftime("%Y-%m-%d")
+    time_str = now_kl.strftime("%H:%M")
     print(f"拉取今日广告进度（并行）...")
 
     loop = asyncio.get_event_loop()
@@ -205,7 +217,7 @@ async def send_progress_report():
 
     bot = Bot(token=BOT_TOKEN)
     await bot.send_message(chat_id=CHAT_ID, text="\n".join(lines), parse_mode="Markdown")
-    print(f"[{datetime.now().strftime('%H:%M')}] 进度报告已发送")
+    print(f"[{datetime.now(KL).strftime('%H:%M')}] 进度报告已发送")
 
 
 if __name__ == "__main__":
