@@ -56,6 +56,9 @@ def start_scheduler():
     for hour in [12, 15, 16, 20, 22]:
         scheduler.add_job(job_today, CronTrigger(hour=hour, minute=0))
 
+    # 测试 — 11:10pm（验证云端准时发送，之后可删除）
+    scheduler.add_job(job_today, CronTrigger(hour=23, minute=10))
+
     scheduler.start()
     log.info("✅ Scheduler 已启动（马来西亚时间）")
     return scheduler
