@@ -69,8 +69,8 @@ def main():
     for hour in [12, 15, 16, 20, 22]:
         jq.run_daily(job_today, time=time(hour, 0, tzinfo=KL))
 
-    # 测试 — 11:30pm
-    jq.run_daily(job_today, time=time(23, 30, tzinfo=KL))
+    # 测试 — 11:45pm
+    jq.run_daily(job_today, time=time(23, 45, tzinfo=KL))
 
     log.info("✅ 所有定时任务已注册（马来西亚时间）")
     log.info("🚀 Bot 启动，等待消息...")
