@@ -25,6 +25,7 @@ AD_ACCOUNTS = [
     {"id": "act_282711469121395", "name": "TRAINER ADS (D9)"},
 ]
 
+D9_ACCOUNT_ID = "act_282711469121395"
 MSG_ACTION = "onsite_conversion.messaging_conversation_started_7d"
 
 
@@ -67,6 +68,45 @@ def fetch_account_insights(account_id: str, date_preset: str) -> dict:
     return {"spend": 0, "impressions": 0, "clicks": 0, "conversations": 0, "cpmc": 0}
 
 
+def fetch_campaign_insights(account_id: str, date_preset: str) -> list:
+    url = f"{GRAPH_API}/{account_id}/campaigns"
+    params = {
+        "fields": f"name,insights.date_preset({date_preset}){{spend,actions,cost_per_action_type}}",
+        "access_token": META_ACCESS_TOKEN,
+        "limit": 50,
+    }
+    campaigns = []
+    while url:
+        resp = requests.get(url, params=params, timeout=10)
+        raw = resp.json()
+        if "error" in raw:
+            log.error(f"fetch_campaign_insights error ({account_id}): {raw['error']}")
+            return []
+        campaigns.extend(raw.get("data", []))
+        next_url = raw.get("paging", {}).get("next")
+        url = next_url if next_url else None
+        params = {}
+
+    results = []
+    for c in campaigns:
+        ins_data = c.get("insights", {}).get("data", [])
+        if not ins_data:
+            continue
+        ins = ins_data[0]
+        spend = float(ins.get("spend", 0) or 0)
+        if spend <= 0:
+            continue
+        conversations = get_action_value(ins.get("actions", []), MSG_ACTION)
+        cpmc = get_action_value(ins.get("cost_per_action_type", []), MSG_ACTION)
+        results.append({
+            "name": c["name"],
+            "spend": spend,
+            "conversations": int(conversations),
+            "cpmc": cpmc,
+        })
+    return sorted(results, key=lambda x: x["spend"], reverse=True)
+
+
 def fetch_top_low_cpmc_ads(account_id: str, date_preset: str, top_n: int = 5) -> list:
     url = f"{GRAPH_API}/{account_id}/ads"
     params = {
@@ -106,7 +146,42 @@ def fetch_top_low_cpmc_ads(account_id: str, date_preset: str, top_n: int = 5) ->
     return sorted(results, key=lambda x: x["cpmc"])[:top_n]
 
 
-def build_morning_report(accounts_data: list, top_ads: list, report_date: str) -> str:
+def group_campaigns(campaigns: list) -> list:
+    groups = {}
+    for c in campaigns:
+        m = re.match(r'^(\[[^\]]+\])', c["name"])
+        key = m.group(1) if m else c["name"].split(" ")[0]
+        if key not in groups:
+            groups[key] = {"name": key, "spend": 0.0, "conversations": 0}
+        groups[key]["spend"] += c["spend"]
+        groups[key]["conversations"] += c["conversations"]
+    result = []
+    for g in groups.values():
+        g["cpmc"] = g["spend"] / g["conversations"] if g["conversations"] > 0 else 0
+        result.append(g)
+    return sorted(result, key=lambda x: x["spend"], reverse=True)
+
+
+def build_d9_campaign_section(campaigns: list) -> list:
+    lines = [
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "*📋 TRAINER ADS (D9) — 广告系列汇总:*",
+        "",
+    ]
+    if campaigns:
+        for g in group_campaigns(campaigns):
+            cpmc_str = f"MYR {g['cpmc']:.2f}" if g["conversations"] > 0 else "—"
+            lines.append(
+                f"📌 *{g['name']}*\n"
+                f"  花费 `MYR {g['spend']:,.2f}` | 对话 `{g['conversations']}` | 单次对话 `{cpmc_str}`"
+            )
+    else:
+        lines.append("_暂无数据_")
+    return lines
+
+
+def build_morning_report(accounts_data: list, top_ads: list, report_date: str, d9_campaigns: list = None) -> str:
     grand_spend = sum(d["spend"] for d in accounts_data)
     grand_impressions = sum(d["impressions"] for d in accounts_data)
     grand_clicks = sum(d["clicks"] for d in accounts_data)
@@ -153,6 +228,9 @@ def build_morning_report(accounts_data: list, top_ads: list, report_date: str) -
     else:
         lines.append("_暂无数据_")
 
+    if d9_campaigns is not None:
+        lines += build_d9_campaign_section(d9_campaigns)
+
     return "\n".join(lines)
 
 
@@ -160,7 +238,10 @@ async def fetch_account_data_async(account: dict, date_preset: str) -> tuple:
     loop = asyncio.get_event_loop()
     ins = await loop.run_in_executor(None, fetch_account_insights, account["id"], date_preset)
     top_ads = await loop.run_in_executor(None, fetch_top_low_cpmc_ads, account["id"], date_preset, 5)
-    return {**ins, "name": account["name"]}, top_ads
+    campaigns = []
+    if account["id"] == D9_ACCOUNT_ID:
+        campaigns = await loop.run_in_executor(None, fetch_campaign_insights, account["id"], date_preset)
+    return {**ins, "name": account["name"]}, top_ads, campaigns
 
 
 async def send_morning_report():
@@ -176,8 +257,9 @@ async def send_morning_report():
     accounts_data = [r[0] for r in results]
     all_top_ads = [ad for r in results for ad in r[1]]
     top5 = sorted(all_top_ads, key=lambda x: x["cpmc"])[:5]
+    d9_campaigns = next((r[2] for r in results if r[0]["name"] == "TRAINER ADS (D9)"), [])
 
-    report = build_morning_report(accounts_data, top5, report_date)
+    report = build_morning_report(accounts_data, top5, report_date, d9_campaigns)
     bot = Bot(token=BOT_TOKEN)
     await bot.send_message(chat_id=CHAT_ID, text=report, parse_mode="Markdown")
     print(f"[{datetime.now(KL).strftime('%H:%M')}] 早间报告已发送")
@@ -191,11 +273,14 @@ async def send_progress_report():
     print(f"拉取今日广告进度（并行）...")
 
     loop = asyncio.get_event_loop()
-    results = await asyncio.gather(*[
-        loop.run_in_executor(None, fetch_account_insights, account["id"], date_preset)
-        for account in AD_ACCOUNTS
-    ])
-    accounts_data = [{**ins, "name": AD_ACCOUNTS[i]["name"]} for i, ins in enumerate(results)]
+    ins_results, d9_campaigns = await asyncio.gather(
+        asyncio.gather(*[
+            loop.run_in_executor(None, fetch_account_insights, account["id"], date_preset)
+            for account in AD_ACCOUNTS
+        ]),
+        loop.run_in_executor(None, fetch_campaign_insights, D9_ACCOUNT_ID, date_preset),
+    )
+    accounts_data = [{**ins, "name": AD_ACCOUNTS[i]["name"]} for i, ins in enumerate(ins_results)]
 
     grand_spend = sum(d["spend"] for d in accounts_data)
     grand_conv = sum(d["conversations"] for d in accounts_data)
@@ -214,6 +299,7 @@ async def send_progress_report():
             f"📂 *{d['name']}*\n"
             f"  花费 `MYR {d['spend']:,.2f}` | 对话 `{d['conversations']}` | 单次对话 `MYR {d['cpmc']:.2f}`"
         )
+    lines += build_d9_campaign_section(d9_campaigns)
 
     bot = Bot(token=BOT_TOKEN)
     await bot.send_message(chat_id=CHAT_ID, text="\n".join(lines), parse_mode="Markdown")
